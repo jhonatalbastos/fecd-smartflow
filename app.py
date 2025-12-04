@@ -185,20 +185,27 @@ def main():
             submitted = st.form_submit_button("✅ Criar Demandas Selecionadas")
 
         if submitted:
-            # FIX APLICADO: Garante que a chave existe antes de tentar acessá-la
+            # FIX REFORÇADO: Garante que a chave existe e que a seleção é feita pelo índice
             if 'emails_to_select' in st.session_state:
-                # O DataFrame no estado da sessão não tem o ID_Email. Usamos o DF original para mapear.
+                
+                # O DataFrame no estado da sessão contém o estado dos Checkboxes ('Select')
                 selected_df_state = pd.DataFrame(st.session_state.emails_to_select)
                 
-                # Juntamos o DF original com a coluna de seleção do estado
-                # O DF no estado não tem todas as colunas, então fazemos um merge (ou reindexamos com cuidado)
+                try:
+                    # 1. Obter a série booleana da coluna 'Select' (True/False)
+                    select_series = selected_df_state['Select']
+                    
+                    # 2. Aplicar esta série booleana ao DataFrame original completo
+                    # Usamos o .values para garantir que seja aplicado como máscara booleana, ignorando possíveis diferenças de índice
+                    selected_rows = df_emails_capture.loc[select_series.values]
                 
-                # Método mais seguro: Usar o índice do estado para buscar no DF original
-                # Criamos um DF temporário com a coluna 'Select' do estado
-                df_original_com_select = df_emails_capture.copy()
-                df_original_com_select['Select'] = selected_df_state['Select']
-                
-                selected_rows = df_original_com_select.loc[df_original_com_select['Select'] == True]
+                except KeyError:
+                    st.warning("A coluna 'Select' não foi encontrada no estado da sessão. Tente submeter novamente.")
+                    selected_rows = pd.DataFrame() # Cria um DF vazio para evitar erro no if
+                except Exception as e:
+                    st.error(f"Erro ao mapear a seleção: {e}")
+                    selected_rows = pd.DataFrame()
+
                 
                 if not selected_rows.empty:
                     emails_to_process = selected_rows.to_dict('records')
@@ -212,12 +219,19 @@ def main():
                         if email['ID_Email'] not in selected_ids
                     ]
                     # Limpa a chave do DataFrame editável para forçar a atualização da tabela na próxima execução
-                    del st.session_state['emails_to_select'] 
+                    if 'emails_to_select' in st.session_state:
+                        del st.session_state['emails_to_select'] 
                     st.rerun() # Recarrega para atualizar a tabela de seleção
                 else:
-                    st.warning("Selecione pelo menos um e-mail para criar uma demanda.")
+                    # Se o DF não estiver vazio, mas a seleção estiver vazia:
+                    if 'emails_to_select' in st.session_state and selected_df_state['Select'].any():
+                         # Caso de erro de mapeamento que resultou em DF vazio
+                         st.error("Houve um erro no processamento da sua seleção. Tente novamente.")
+                    else:
+                         st.warning("Selecione pelo menos um e-mail para criar uma demanda.")
             else:
-                st.warning("Erro interno na leitura do estado da seleção. Tente novamente.")
+                # Caso a chave ainda não exista
+                st.warning("Erro interno na leitura do estado da seleção. Por favor, tente submeter o formulário novamente.")
 
     st.markdown("---")
 
