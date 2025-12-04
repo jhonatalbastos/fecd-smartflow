@@ -2,23 +2,25 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
+import uuid # Módulo para gerar IDs únicos para as demandas
 
 # --- Configurações da Aplicação ---
 st.set_page_config(
-    page_title="FECD SmartFlow - Captura de Demandas",
+    page_title="FECD SmartFlow - Captura e Gerenciamento de Demandas",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 # Constantes para a Microsoft Graph API
 MS_GRAPH_URL_BASE = "https://graph.microsoft.com/v1.0"
-SCOPES = ["https://graph.microsoft.com/.default"] # Permissão padrão para Client Credentials Flow
+SCOPES = ["https://graph.microsoft.com/.default"]
 
-# --- Funções de Autenticação e API ---
+# --- Funções de Autenticação e API (Mantidas como no código anterior) ---
 
-@st.cache_resource(ttl=3600)  # Cacheia o token por 1 hora
+@st.cache_resource(ttl=3600) 
 def get_access_token(client_id, tenant_id, client_secret):
     """Obtém um token de acesso usando Client Credentials Flow."""
+    # ... (Código da função get_access_token) ...
     token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
     
     payload = {
@@ -30,7 +32,7 @@ def get_access_token(client_id, tenant_id, client_secret):
     
     try:
         response = requests.post(token_url, data=payload)
-        response.raise_for_status() # Lança exceção para status ruins (4xx ou 5xx)
+        response.raise_for_status()
         return response.json().get('access_token')
     except requests.exceptions.RequestException as e:
         st.error(f"Erro ao obter o token de acesso do Microsoft Graph: {e}")
@@ -38,18 +40,13 @@ def get_access_token(client_id, tenant_id, client_secret):
 
 def fetch_emails(access_token, user_email, days_ago=7):
     """Busca e-mails recentes de um usuário específico."""
+    # ... (Código da função fetch_emails) ...
     if not access_token:
         return []
 
-    # Calcular a data limite (apenas mensagens dos últimos 'days_ago')
     date_limit = (datetime.now() - timedelta(days=days_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    
-    # Query de filtro OData: filtra por data, e-mails não lidos e na pasta Inbox
-    # O filtro 'isRead eq false' é crucial para focar nas demandas novas
-    # Filtro 'receivedDateTime ge {date_limit}' garante que só trazemos e-mails recentes
     filter_query = f"isRead eq false and receivedDateTime ge {date_limit}"
     
-    # Endpoint para buscar mensagens na caixa de correio do usuário
     url = f"{MS_GRAPH_URL_BASE}/users/{user_email}/mailFolders/inbox/messages"
     
     headers = {
@@ -58,9 +55,9 @@ def fetch_emails(access_token, user_email, days_ago=7):
     }
     
     params = {
-        '$select': 'subject,sender,receivedDateTime,bodyPreview', # Campos que queremos
+        '$select': 'subject,sender,receivedDateTime,bodyPreview', 
         '$filter': filter_query,
-        '$orderby': 'receivedDateTime desc' # Ordena do mais novo para o mais antigo
+        '$orderby': 'receivedDateTime desc'
     }
     
     try:
@@ -75,18 +72,42 @@ def fetch_emails(access_token, user_email, days_ago=7):
 def extract_email_data(message):
     """Extrai os dados relevantes de uma mensagem de e-mail."""
     return {
-        'ID': message.get('id'),
+        'ID_Email': message.get('id'), # Renomeado para ID_Email para evitar conflito com ID_Demanda
         'Assunto': message.get('subject'),
         'Remetente': message.get('sender', {}).get('emailAddress', {}).get('address', 'N/A'),
         'Data/Hora': pd.to_datetime(message.get('receivedDateTime')).tz_convert('America/Sao_Paulo').strftime('%d/%m/%Y %H:%M'),
         'Pré-visualização do Corpo': message.get('bodyPreview', 'Sem pré-visualização'),
-        'Status': 'Pendente' # Status inicial para a demanda
     }
+
+# --- Funções de Gerenciamento de Demandas ---
+
+def create_demands(selected_emails):
+    """Cria novas demandas a partir dos e-mails selecionados e as adiciona ao estado."""
+    new_demands = []
+    
+    # Se a lista de demandas no estado não existe, inicializa
+    if 'demands' not in st.session_state:
+        st.session_state.demands = []
+        
+    for email in selected_emails:
+        new_demand = {
+            'ID_Demanda': str(uuid.uuid4())[:8], # ID único para a demanda
+            'Assunto': email['Assunto'],
+            'Remetente': email['Remetente'],
+            'Data_Criacao': datetime.now().strftime('%d/%m/%Y %H:%M'),
+            'Status': 'A Fazer',
+            'Prioridade': 'Média' # Pode ser editado depois
+        }
+        new_demands.append(new_demand)
+
+    # Adiciona as novas demandas à lista de demandas existente
+    st.session_state.demands.extend(new_demands)
+    st.success(f"Foram criadas **{len(new_demands)}** novas demandas.")
 
 # --- Layout e Processamento do Streamlit ---
 
 def main():
-    st.title("📧 FECD SmartFlow: Captura de Demandas (Outlook/Graph API)")
+    st.title("📧 FECD SmartFlow: Captura e Gerenciamento de Demandas")
     
     # 1. Carregar Configurações
     try:
@@ -98,53 +119,144 @@ def main():
         st.error(f"Erro: Chave de segredo não encontrada no .streamlit/secrets.toml: {e}")
         st.stop()
 
+    # Inicializa o estado da sessão para armazenar os e-mails e as demandas
+    if 'emails_data' not in st.session_state:
+        st.session_state.emails_data = [] # E-mails capturados
+    if 'demands' not in st.session_state:
+        st.session_state.demands = [] # Demandas criadas
+
     st.sidebar.header("⚙️ Configurações da Busca")
-    
-    # Seletor de período
     period_days = st.sidebar.slider(
         "Buscar e-mails dos últimos (dias):",
-        min_value=1, max_value=30, value=7, step=1
+        min_value=1, max_value=30, value=7, step=1, key="period_slider"
     )
 
-    if st.sidebar.button("🔄 Buscar E-mails Não Lidos"):
+    if st.sidebar.button("🔄 Buscar Novos E-mails"):
         with st.spinner(f"Conectando ao Microsoft Graph e buscando mensagens de {user_email}..."):
-            # 2. Obter Token
             access_token = get_access_token(client_id, tenant_id, client_secret)
 
             if access_token:
                 st.success("Token de Acesso obtido com sucesso.")
-
-                # 3. Buscar E-mails
                 email_messages = fetch_emails(access_token, user_email, period_days)
                 
                 if email_messages:
-                    st.success(f"Encontrados {len(email_messages)} novos e-mails na sua caixa de entrada.")
-                    
-                    # 4. Processar e Exibir
-                    data = [extract_email_data(msg) for msg in email_messages]
-                    df_emails = pd.DataFrame(data)
-                    
-                    st.subheader("Novas Demandas Capturadas")
-                    st.dataframe(df_emails, height=600)
-                    
-                    # 5. Exportação
-                    @st.cache_data
-                    def convert_df_to_csv(df):
-                        # Converte o DataFrame para CSV e codifica em UTF-8
-                        return df.to_csv(index=False, encoding='utf-8-sig')
-
-                    csv = convert_df_to_csv(df_emails)
-                    st.download_button(
-                        label="📥 Exportar para CSV",
-                        data=csv,
-                        file_name=f'demandas_fecd_{datetime.now().strftime("%Y%m%d_%H%M")}.csv',
-                        mime='text/csv',
-                        help="Baixa a tabela de demandas exibida."
-                    )
+                    # Salva os dados brutos dos e-mails no estado da sessão
+                    st.session_state.emails_data = [extract_email_data(msg) for msg in email_messages]
+                    st.success(f"Encontrados **{len(st.session_state.emails_data)}** novos e-mails na sua caixa de entrada.")
                 else:
                     st.info("Nenhum e-mail não lido encontrado no período selecionado.")
+                    st.session_state.emails_data = [] # Limpa a lista se não houver novos
             else:
                 st.error("Falha ao buscar e-mails: Não foi possível obter o token de acesso.")
+
+    # --- Seção 1: Captura e Seleção de E-mails ---
+    
+    if st.session_state.emails_data:
+        st.header("1. E-mails Capturados: Selecione para Criar Demandas")
+        
+        # Cria um DataFrame para a exibição (adicionando a coluna de seleção)
+        df_emails_capture = pd.DataFrame(st.session_state.emails_data)
+        
+        # Cria um contêiner para o formulário de seleção
+        with st.form("email_selection_form"):
+            st.dataframe(
+                df_emails_capture.drop(columns=['ID_Email', 'Pré-visualização do Corpo']), # Remove colunas internas da visualização inicial
+                use_container_width=True,
+                # Permite edição do DataFrame para adicionar checkboxes
+                column_config={
+                    "Select": st.column_config.CheckboxColumn(
+                        "Selecionar",
+                        help="Marque os e-mails que devem virar uma demanda.",
+                        default=False,
+                    )
+                },
+                key="emails_to_select",
+                hide_index=True
+            )
+            
+            submitted = st.form_submit_button("✅ Criar Demandas Selecionadas")
+
+        if submitted:
+            # Pega as linhas selecionadas no dataframe editável
+            selected_rows = st.session_state.emails_to_select.loc[st.session_state.emails_to_select['Select'] == True]
+            
+            if not selected_rows.empty:
+                # Mapeia as linhas selecionadas de volta para os dados originais dos e-mails
+                # Usamos o ID_Email para garantir a correspondência correta
+                selected_ids = selected_rows['ID_Email'].tolist()
+                
+                emails_to_process = [
+                    email for email in st.session_state.emails_data 
+                    if email['ID_Email'] in selected_ids
+                ]
+                
+                create_demands(emails_to_process)
+                
+                # Opcional: Remover os e-mails processados da lista de captura
+                st.session_state.emails_data = [
+                    email for email in st.session_state.emails_data 
+                    if email['ID_Email'] not in selected_ids
+                ]
+                # Recarrega a página para atualizar a tabela de seleção
+                st.rerun()
+            else:
+                st.warning("Selecione pelo menos um e-mail para criar uma demanda.")
+
+    # --- Seção 2: Gerenciamento de Demandas Criadas ---
+    
+    st.header("2. Demandas Ativas")
+    
+    if st.session_state.demands:
+        # Converte a lista de demandas em DataFrame para exibição
+        df_demandas = pd.DataFrame(st.session_state.demands)
+        
+        st.dataframe(
+            df_demandas,
+            use_container_width=True,
+            column_config={
+                "Status": st.column_config.SelectboxColumn(
+                    "Status",
+                    options=["A Fazer", "Em Andamento", "Concluída", "Cancelada"],
+                    required=True,
+                ),
+                "Prioridade": st.column_config.SelectboxColumn(
+                    "Prioridade",
+                    options=["Baixa", "Média", "Alta", "Urgente"],
+                    required=True,
+                ),
+                # Remove o ID único da visualização principal
+                "ID_Demanda": None, 
+            },
+            key="active_demands_table",
+            hide_index=True,
+        )
+
+        st.caption("Você pode editar o **Status** e a **Prioridade** diretamente na tabela acima.")
+        
+        # Botão para salvar alterações (após a edição direta no DataFrame)
+        if st.button("💾 Salvar Alterações nas Demandas"):
+            # O Streamlit salva automaticamente o DataFrame editado no st.session_state.active_demands_table
+            # Atualizamos a lista de demandas com os novos valores
+            st.session_state.demands = st.session_state.active_demands_table.to_dict('records')
+            st.success("Demandas atualizadas com sucesso!")
+
+        # Exportação das demandas ativas
+        @st.cache_data
+        def convert_df_to_csv(df):
+            return df.to_csv(index=False, encoding='utf-8-sig')
+
+        csv_demandas = convert_df_to_csv(df_demandas)
+        st.download_button(
+            label="📥 Exportar Demandas Ativas (CSV)",
+            data=csv_demandas,
+            file_name=f'demandas_ativas_fecd_{datetime.now().strftime("%Y%m%d_%H%M")}.csv',
+            mime='text/csv',
+            help="Baixa a lista atual de todas as demandas ativas."
+        )
+
+    else:
+        st.info("Nenhuma demanda ativa no momento. Busque novos e-mails para começar!")
+
 
 if __name__ == "__main__":
     main()
