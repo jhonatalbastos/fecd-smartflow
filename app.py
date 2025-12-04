@@ -2,7 +2,8 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
-import uuid # Módulo para gerar IDs únicos para as demandas
+import uuid 
+from urllib.parse import quote # Para codificar o e-mail na URL do Graph
 
 # --- Configurações da Aplicação ---
 st.set_page_config(
@@ -13,11 +14,11 @@ st.set_page_config(
 
 # Constantes para a Microsoft Graph API
 MS_GRAPH_URL_BASE = "https://graph.microsoft.com/v1.0"
-SCOPES = ["https://graph.microsoft.com/.default"] # Permissão padrão para Client Credentials Flow
+SCOPES = ["https://graph.microsoft.com/.default"] 
 
 # --- Funções de Autenticação e API ---
 
-@st.cache_resource(ttl=3600)  # Cacheia o token por 1 hora
+@st.cache_resource(ttl=3600)  
 def get_access_token(client_id, tenant_id, client_secret):
     """Obtém um token de acesso usando Client Credentials Flow."""
     token_url = f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
@@ -31,7 +32,7 @@ def get_access_token(client_id, tenant_id, client_secret):
     
     try:
         response = requests.post(token_url, data=payload)
-        response.raise_for_status() # Lança exceção para status ruins (4xx ou 5xx)
+        response.raise_for_status() 
         return response.json().get('access_token')
     except requests.exceptions.RequestException as e:
         st.error(f"Erro ao obter o token de acesso do Microsoft Graph: {e}")
@@ -42,13 +43,9 @@ def fetch_emails(access_token, user_email, days_ago=7):
     if not access_token:
         return []
 
-    # Calcular a data limite (apenas mensagens dos últimos 'days_ago')
     date_limit = (datetime.now() - timedelta(days=days_ago)).strftime('%Y-%m-%dT%H:%M:%SZ')
-    
-    # Query de filtro OData: filtra por data, e-mails não lidos e na pasta Inbox
     filter_query = f"isRead eq false and receivedDateTime ge {date_limit}"
     
-    # Endpoint para buscar mensagens na caixa de correio do usuário
     url = f"{MS_GRAPH_URL_BASE}/users/{user_email}/mailFolders/inbox/messages"
     
     headers = {
@@ -57,9 +54,9 @@ def fetch_emails(access_token, user_email, days_ago=7):
     }
     
     params = {
-        '$select': 'subject,sender,receivedDateTime,bodyPreview,id', # Incluindo 'id' para referência
+        '$select': 'subject,sender,receivedDateTime,bodyPreview,id', 
         '$filter': filter_query,
-        '$orderby': 'receivedDateTime desc' # Ordena do mais novo para o mais antigo
+        '$orderby': 'receivedDateTime desc' 
     }
     
     try:
@@ -74,37 +71,54 @@ def fetch_emails(access_token, user_email, days_ago=7):
 def extract_email_data(message):
     """Extrai os dados relevantes de uma mensagem de e-mail."""
     return {
-        'ID_Email': message.get('id'), # Renomeado para ID_Email para evitar conflito com ID_Demanda
+        'ID_Email': message.get('id'),
         'Assunto': message.get('subject'),
         'Remetente': message.get('sender', {}).get('emailAddress', {}).get('address', 'N/A'),
         'Data/Hora': pd.to_datetime(message.get('receivedDateTime')).tz_convert('America/Sao_Paulo').strftime('%d/%m/%Y %H:%M'),
         'Pré-visualização do Corpo': message.get('bodyPreview', 'Sem pré-visualização'),
+        'Selecionar': False # Coluna auxiliar para o checkbox
     }
 
 # --- Funções de Gerenciamento de Demandas ---
 
-def create_demands(selected_emails):
+def create_demands(df_selected_emails):
     """Cria novas demandas a partir dos e-mails selecionados e as adiciona ao estado."""
-    new_demands = []
     
     # Se a lista de demandas no estado não existe, inicializa
     if 'demands' not in st.session_state:
         st.session_state.demands = []
         
-    for email in selected_emails:
-        new_demand = {
-            'ID_Demanda': str(uuid.uuid4())[:8], # ID único para a demanda
-            'Assunto': email['Assunto'],
-            'Remetente': email['Remetente'],
-            'Data_Criacao': datetime.now().strftime('%d/%m/%Y %H:%M'),
-            'Status': 'A Fazer',
-            'Prioridade': 'Média' # Pode ser editado depois
-        }
-        new_demands.append(new_demand)
+    emails_to_process = df_selected_emails.to_dict('records')
+    new_demands_count = 0
+    selected_ids = []
 
-    # Adiciona as novas demandas à lista de demandas existente
-    st.session_state.demands.extend(new_demands)
-    st.success(f"Foram criadas **{len(new_demands)}** novas demandas.")
+    for email in emails_to_process:
+        # Apenas cria a demanda se o checkbox 'Selecionar' for True
+        if email['Selecionar']:
+            new_demand = {
+                'ID_Demanda': str(uuid.uuid4())[:8],
+                'Assunto': email['Assunto'],
+                'Remetente': email['Remetente'],
+                'Data_Criacao': datetime.now().strftime('%d/%m/%Y %H:%M'),
+                'Status': 'A Fazer',
+                'Prioridade': 'Média'
+            }
+            st.session_state.demands.append(new_demand)
+            selected_ids.append(email['ID_Email'])
+            new_demands_count += 1
+
+    st.success(f"Foram criadas **{new_demands_count}** novas demandas.")
+    
+    # Remove os e-mails processados da lista de captura
+    st.session_state.emails_data = [
+        email for email in st.session_state.emails_data 
+        if email['ID_Email'] not in selected_ids
+    ]
+    # Limpa o DataFrame editável para garantir que ele seja reconstruído corretamente
+    if 'emails_data_df_edited' in st.session_state:
+        del st.session_state['emails_data_df_edited']
+        
+    st.rerun()
 
 # --- Layout e Processamento do Streamlit ---
 
@@ -123,9 +137,14 @@ def main():
 
     # Inicializa o estado da sessão para armazenar os e-mails e as demandas
     if 'emails_data' not in st.session_state:
-        st.session_state.emails_data = [] # E-mails capturados
+        st.session_state.emails_data = [] 
     if 'demands' not in st.session_state:
-        st.session_state.demands = [] # Demandas criadas
+        st.session_state.demands = [] 
+    
+    # Inicializa o DataFrame editado no estado para uso posterior
+    if 'emails_data_df_edited' not in st.session_state:
+        st.session_state.emails_data_df_edited = pd.DataFrame()
+
 
     st.sidebar.header("⚙️ Configurações da Busca")
     period_days = st.sidebar.slider(
@@ -138,16 +157,17 @@ def main():
             access_token = get_access_token(client_id, tenant_id, client_secret)
 
             if access_token:
-                #st.success("Token de Acesso obtido com sucesso.")
                 email_messages = fetch_emails(access_token, user_email, period_days)
                 
                 if email_messages:
-                    # Salva os dados brutos dos e-mails no estado da sessão
                     st.session_state.emails_data = [extract_email_data(msg) for msg in email_messages]
                     st.success(f"Encontrados **{len(st.session_state.emails_data)}** novos e-mails na sua caixa de entrada.")
+                    # Reinicializa o DF editado após uma nova busca
+                    st.session_state.emails_data_df_edited = pd.DataFrame(st.session_state.emails_data)
                 else:
                     st.info("Nenhum e-mail não lido encontrado no período selecionado.")
-                    st.session_state.emails_data = [] # Limpa a lista se não houver novos
+                    st.session_state.emails_data = [] 
+                    st.session_state.emails_data_df_edited = pd.DataFrame()
             else:
                 st.error("Falha ao buscar e-mails: Não foi possível obter o token de acesso.")
     
@@ -159,79 +179,48 @@ def main():
     if st.session_state.emails_data:
         st.header("1. E-mails Capturados: Selecione para Criar Demandas")
         
-        # Cria um DataFrame para a exibição (adicionando a coluna de seleção)
+        # Cria um DataFrame a partir da lista de dados para ser editado
         df_emails_capture = pd.DataFrame(st.session_state.emails_data)
         
-        # Cria um contêiner para o formulário de seleção
-        with st.form("email_selection_form"):
-            st.caption("Marque os e-mails que devem virar uma demanda na coluna **Selecionar**.")
-            
-            # DataFrame editável (a chave "emails_to_select" será criada no st.session_state)
-            st.dataframe(
-                df_emails_capture.drop(columns=['ID_Email']), # Remove a coluna ID_Email da visualização inicial
-                use_container_width=True,
-                column_config={
-                    "Select": st.column_config.CheckboxColumn(
-                        "Selecionar",
-                        help="Marque os e-mails que devem virar uma demanda.",
-                        default=False,
-                    ),
-                    "Pré-visualização do Corpo": None # Esconde a pré-visualização, focando no assunto
-                },
-                key="emails_to_select",
-                hide_index=True
-            )
-            
-            submitted = st.form_submit_button("✅ Criar Demandas Selecionadas")
+        # Mapeamento do DataFrame para a chave de estado que será editada
+        # Este é o ponto chave: o DataFrame editável deve ser inicializado, mas não no form
+        
+        # Usamos o st.data_editor fora do st.form para evitar o erro de estado.
+        df_editavel = st.data_editor(
+            df_emails_capture.drop(columns=['ID_Email']), 
+            use_container_width=True,
+            column_config={
+                "Selecionar": st.column_config.CheckboxColumn(
+                    "Selecionar",
+                    help="Marque os e-mails que devem virar uma demanda.",
+                    default=False,
+                    width="small"
+                ),
+                "Pré-visualização do Corpo": None 
+            },
+            key="emails_data_df_edited", # A chave onde o estado editado será salvo
+            hide_index=True
+        )
+        
+        # O botão de processamento agora está dentro de um formulário simples para uma ação de clique
+        with st.form("process_demands_form"):
+            process_button = st.form_submit_button("✅ Criar Demandas Selecionadas")
 
-        if submitted:
-            # FIX REFORÇADO: Garante que a chave existe e que a seleção é feita pelo índice
-            if 'emails_to_select' in st.session_state:
+        if process_button:
+            # Pega o DataFrame editado salvo pelo st.data_editor no estado da sessão
+            df_final_com_selecao = st.session_state['emails_data_df_edited']
+            
+            # Filtra as linhas onde 'Selecionar' é True
+            selected_rows = df_final_com_selecao.loc[df_final_com_selecao['Selecionar'] == True]
+            
+            if not selected_rows.empty:
+                # Chama a função de criação de demandas com as linhas filtradas
+                create_demands(selected_rows)
                 
-                # O DataFrame no estado da sessão contém o estado dos Checkboxes ('Select')
-                selected_df_state = pd.DataFrame(st.session_state.emails_to_select)
-                
-                try:
-                    # 1. Obter a série booleana da coluna 'Select' (True/False)
-                    select_series = selected_df_state['Select']
-                    
-                    # 2. Aplicar esta série booleana ao DataFrame original completo
-                    # Usamos o .values para garantir que seja aplicado como máscara booleana, ignorando possíveis diferenças de índice
-                    selected_rows = df_emails_capture.loc[select_series.values]
-                
-                except KeyError:
-                    st.warning("A coluna 'Select' não foi encontrada no estado da sessão. Tente submeter novamente.")
-                    selected_rows = pd.DataFrame() # Cria um DF vazio para evitar erro no if
-                except Exception as e:
-                    st.error(f"Erro ao mapear a seleção: {e}")
-                    selected_rows = pd.DataFrame()
-
-                
-                if not selected_rows.empty:
-                    emails_to_process = selected_rows.to_dict('records')
-                    
-                    create_demands(emails_to_process)
-                    
-                    # Remove os e-mails processados da lista de captura
-                    selected_ids = selected_rows['ID_Email'].tolist()
-                    st.session_state.emails_data = [
-                        email for email in st.session_state.emails_data 
-                        if email['ID_Email'] not in selected_ids
-                    ]
-                    # Limpa a chave do DataFrame editável para forçar a atualização da tabela na próxima execução
-                    if 'emails_to_select' in st.session_state:
-                        del st.session_state['emails_to_select'] 
-                    st.rerun() # Recarrega para atualizar a tabela de seleção
-                else:
-                    # Se o DF não estiver vazio, mas a seleção estiver vazia:
-                    if 'emails_to_select' in st.session_state and selected_df_state['Select'].any():
-                         # Caso de erro de mapeamento que resultou em DF vazio
-                         st.error("Houve um erro no processamento da sua seleção. Tente novamente.")
-                    else:
-                         st.warning("Selecione pelo menos um e-mail para criar uma demanda.")
+                # O st.rerun() já é chamado dentro da create_demands, mas mantemos a chamada aqui para clareza
+                st.rerun()
             else:
-                # Caso a chave ainda não exista
-                st.warning("Erro interno na leitura do estado da seleção. Por favor, tente submeter o formulário novamente.")
+                st.warning("Selecione pelo menos um e-mail para criar uma demanda.")
 
     st.markdown("---")
 
@@ -243,7 +232,8 @@ def main():
         # Converte a lista de demandas em DataFrame para exibição
         df_demandas = pd.DataFrame(st.session_state.demands)
         
-        st.dataframe(
+        # O DataFrame de demandas é editável para que o usuário possa atualizar Status e Prioridade
+        st.data_editor(
             df_demandas,
             use_container_width=True,
             column_config={
@@ -257,20 +247,19 @@ def main():
                     options=["Baixa", "Média", "Alta", "Urgente"],
                     required=True,
                 ),
-                # Remove o ID único da visualização principal
+                # Campos não editáveis e removidos da visualização principal
                 "ID_Demanda": None, 
-                "Remetente": "Remetente Original" # Renomeia para melhor clareza
+                "Remetente": "Remetente Original" 
             },
-            key="active_demands_table", # O estado editável será salvo nesta chave
+            key="active_demands_table", 
             hide_index=True,
         )
 
         st.caption("Você pode editar o **Status** e a **Prioridade** diretamente na tabela acima.")
         
-        # Botão para salvar alterações (após a edição direta no DataFrame)
+        # Botão para salvar alterações (processa a edição feita acima)
         if st.button("💾 Salvar Alterações nas Demandas"):
-            # O Streamlit salva o DataFrame editado no st.session_state.active_demands_table
-            # Atualizamos a lista de demandas com os novos valores
+            # Atualizamos a lista de demandas com os novos valores do data_editor
             st.session_state.demands = st.session_state.active_demands_table.to_dict('records')
             st.success("Demandas atualizadas com sucesso!")
 
