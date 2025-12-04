@@ -1,214 +1,102 @@
 import streamlit as st
 import pandas as pd
-from datetime import date, timedelta
+from imap_tools import MailBox, AND
 
-# --- Configurações Iniciais da Página ---
-st.set_page_config(layout="wide", page_title="FECD SmartFlow - GTD")
-st.title("FECD SmartFlow 🚦 | Gestão GTD para Gerente Financeiro")
-
-# --- 1. Definições e Constantes (Alinhamento GTD) ---
-
-# Contextos GTD adaptados à sua função (Gerente Financeiro FECD)
-CONTEXTOS_GTD = [
-    "@Computador",
-    "@Escritório",
-    "@Telefonemas",
-    "@Assuntos Diretoria",
-    "Aguardando Resposta",
-    "Algum Dia/Talvez",
-    "Referência" # Não é uma ação, mas é útil para classificar
-]
-
-# Projetos (Placeholder inicial - Deveria ser uma lista dinâmica)
-PROJETOS_INICIAIS = [
-    "Finalizar Relatório Contábil Mensal",
-    "Proposta de Home Office (KPIs)",
-    "Auditoria Interna de NFs Imobilizado"
-]
-
-# --- 2. Funções de Suporte ---
-
-def calcular_semaforo(data_limite):
-    """
-    Implementa a lógica do 'Antecipação Semáforo'.
-    VERMELHO: 0 a 1 dia (prazo estourando).
-    AMARELO: 2 a 5 dias.
-    VERDE: Mais de 5 dias.
-    """
-    hoje = date.today()
-    if pd.isna(data_limite):
-        return "AZUL" # Sem data limite (ações não urgentes)
-
-    dias_restantes = (data_limite - hoje).days
-
-    if dias_restantes <= 1:
-        return "VERMELHO"  # Urgente / Praticamente esgotado
-    elif dias_restantes <= 5:
-        return "AMARELO"   # Atenção / Necessário começar
-    else:
-        return "VERDE"    # Antecipação / Tranquilo
-
-def adicionar_tarefa(acao, projeto, contexto, data_limite, prioridade):
-    """Adiciona uma nova tarefa ao DataFrame no Session State."""
-    if acao:
-        nova_tarefa = {
-            "Ação": acao,
-            "Projeto": projeto,
-            "Contexto": contexto,
-            "Data Limite": data_limite,
-            "Prioridade": prioridade,
-            "Concluída": False,
-            "Semáforo": calcular_semaforo(data_limite)
-        }
-        # Adiciona a nova tarefa ao início da lista
-        st.session_state.tarefas.insert(0, nova_tarefa)
+## Função para carregar credenciais do secrets.toml
+def carregar_credenciais():
+    # As chaves 'imap_server', 'imap_port', 'username' e 'password'
+    # devem estar aninhadas sob a seção [email] no .streamlit/secrets.toml
+    secrets = st.secrets.get("email", {})
     
-def atualizar_status_conclusao(index, status):
-    """Atualiza o status de conclusão de uma tarefa."""
-    st.session_state.tarefas[index]["Concluída"] = status
+    # Verifica se as chaves necessárias estão presentes
+    if not all(key in secrets for key in ["imap_server", "imap_port", "username", "password"]):
+        st.error("Erro: Credenciais de e-mail incompletas ou faltando na seção [email] do secrets.toml.")
+        return None, None, None, None
 
-# --- 3. Inicialização do Session State (Simulação de Banco de Dados) ---
-
-if "tarefas" not in st.session_state:
-    # Cria algumas tarefas iniciais de exemplo (simulando dados persistentes)
-    st.session_state.tarefas = [
-        {"Ação": "Concluir reconciliação do mês anterior", "Projeto": PROJETOS_INICIAIS[0], "Contexto": "@Computador", "Data Limite": date.today() + timedelta(days=2), "Prioridade": 3, "Concluída": False, "Semáforo": calcular_semaforo(date.today() + timedelta(days=2))},
-        {"Ação": "Ligar para fornecedor X sobre NF pendente", "Projeto": None, "Contexto": "@Telefonemas", "Data Limite": date.today() + timedelta(days=6), "Prioridade": 2, "Concluída": False, "Semáforo": calcular_semaforo(date.today() + timedelta(days=6))},
-        {"Ação": "Revisar status das certidões negativas de débito", "Projeto": None, "Contexto": "@Escritório", "Data Limite": date.today() + timedelta(days=1), "Prioridade": 1, "Concluída": False, "Semáforo": calcular_semaforo(date.today() + timedelta(days=1))},
-        {"Ação": "Reunir dados de produtividade para proposta HO", "Projeto": PROJETOS_INICIAIS[1], "Contexto": "@Computador", "Data Limite": date.today() + timedelta(days=15), "Prioridade": 4, "Concluída": False, "Semáforo": calcular_semaforo(date.today() + timedelta(days=15))},
-    ]
-
-# --- 4. Sidebar (Filtros GTD e Módulo 3 - Referência Rápida) ---
-
-with st.sidebar:
-    st.header("Fluxo GTD & Filtros")
-    
-    # Filtro por Contexto
-    filtro_contexto = st.selectbox(
-        "Filtrar por Contexto (Próximas Ações)", 
-        ["TODOS"] + CONTEXTOS_GTD
+    return (
+        secrets.imap_server,
+        secrets.imap_port,
+        secrets.username,
+        secrets.password
     )
-    
-    # Filtro por Projeto
-    filtro_projeto = st.selectbox(
-        "Filtrar por Projeto", 
-        ["TODOS"] + PROJETOS_INICIAIS
-    )
-    
-    st.markdown("---")
-    
-    # Módulo 3: Links de Referência Rápida (GTD - Referência)
-    st.subheader("Links Essenciais (Referência)")
-    st.markdown("- [Pasta Certidões](link_simulado)")
-    st.markdown("- [Planilha Fluxo de Caixa](link_simulado)")
-    st.markdown("- [Notas Fiscais Imobilizado](link_simulado)")
-    
-# --- 5. Formulário de Captura (Pilar: Capturar & Esclarecer) ---
 
-st.header("📥 Capturar & Esclarecer (Inbox)")
-
-with st.form("form_nova_tarefa", clear_on_submit=True):
-    col1, col2, col3 = st.columns([3, 1, 1.5])
+## Função para buscar e-mails
+def buscar_demandas(assunto_filtro="[NOVA DEMANDA TCC]"):
+    server, port, user, password = carregar_credenciais()
     
-    with col1:
-        nova_acao = st.text_input("📝 Próxima Ação (Qual é o resultado desejado?)")
-    with col2:
-        nova_prioridade = st.selectbox("⚡ Prioridade", options=[1, 2, 3, 4], index=2, help="1=Crítico, 4=Baixo")
-    with col3:
-        novo_projeto = st.selectbox("📚 Projeto", options=[None] + PROJETOS_INICIAIS, index=0, help="Se tiver mais de 1 Ação, é um Projeto.")
+    if not server:
+        return pd.DataFrame()
+
+    demandas = []
+
+    try:
+        # 1. Conecta-se ao servidor IMAP
+        # Usa o 'with MailBox' para garantir que a conexão seja fechada
+        with MailBox(server, port).login(user, password) as mailbox:
+            st.info(f"Conectado ao servidor IMAP: {server}")
+
+            # 2. Busca por e-mails com o assunto específico, que ainda não foram lidos (seen=False)
+            emails = mailbox.fetch(
+                criteria=AND(subject=assunto_filtro, seen=False),
+                bulk=True,
+                reverse=True # Mais recente primeiro
+            )
+            
+            # 3. Processa os e-mails encontrados
+            for msg in emails:
+                demandas.append({
+                    "ID": msg.uid,
+                    "Assunto": msg.subject,
+                    "Remetente": msg.from_,
+                    "Data": msg.date,
+                    "Corpo": msg.text if msg.text else msg.html # Prioriza o corpo em texto simples
+                })
+                # Opcional: Marcar o e-mail como lido após a captura
+                # mailbox.mark_seen(msg.uid)
+
+            return pd.DataFrame(demandas)
+
+    except Exception as e:
+        # Captura erros comuns como falha de login (senha incorreta, MFA bloqueando)
+        st.error(f"❌ Erro ao conectar ou buscar e-mails: {e}")
+        st.caption("Verifique se o servidor/porta estão corretos e se você está usando uma Senha de Aplicativo, caso o Outlook exija MFA.")
+        return pd.DataFrame()
+
+# --- Interface Streamlit ---
+
+st.set_page_config(page_title="Captura de Demandas", layout="wide")
+st.title("Sistema de Captura de Demandas (IMAP)")
+st.caption("Busca e-mails não lidos com assunto específico usando as credenciais do Outlook armazenadas em `secrets.toml`.")
+
+# Permite ao usuário alterar o filtro de assunto
+filtro_assunto = st.text_input(
+    "Filtro de Assunto:", 
+    value="[NOVA DEMANDA TCC]",
+    help="O aplicativo buscará e-mails não lidos cujo assunto corresponda a este texto."
+)
+
+st.subheader("Novas Demandas Capturadas")
+
+if st.button("🔄 Buscar Novas Demandas"):
+    with st.spinner("Conectando ao Outlook e buscando e-mails..."):
+        df_demandas = buscar_demandas(filtro_assunto)
         
-    col4, col5, col6 = st.columns([1, 1, 1])
-    
-    with col4:
-        novo_contexto = st.selectbox("📌 Contexto (Onde faço?)", options=CONTEXTOS_GTD)
-    with col5:
-        nova_data_limite = st.date_input("📅 Data Limite", value=None)
-    with col6:
-        # A Regra dos 2 Minutos é aplicada mentalmente pelo usuário
-        st.write(" ") # Espaçamento
-        st.form_submit_button("✅ Adicionar Ação", on_click=adicionar_tarefa, 
-                              args=(nova_acao, novo_projeto, novo_contexto, nova_data_limite, nova_prioridade))
-
-st.markdown("---")
-
-# --- 6. Exibição da Lista de Próximas Ações (Pilar: Organizar & Engajar) ---
-
-st.header("🎯 Próximas Ações & Semáforo")
-
-# Cria o DataFrame para facilitar a visualização e filtro
-df_tarefas = pd.DataFrame(st.session_state.tarefas)
-
-# Aplica os filtros
-df_filtrado = df_tarefas.copy()
-if filtro_contexto != "TODOS":
-    df_filtrado = df_filtrado[df_filtrado["Contexto"] == filtro_contexto]
-if filtro_projeto != "TODOS":
-    df_filtrado = df_filtrado[df_filtrado["Projeto"] == filtro_projeto]
-
-# Separa concluídas das pendentes
-df_pendentes = df_filtrado[df_filtrado["Concluída"] == False]
-
-# Reorganiza a exibição: primeiro as mais urgentes/prioritárias (Semáforo -> Prioridade -> Data)
-df_pendentes = df_pendentes.sort_values(by=["Semáforo", "Prioridade", "Data Limite"], 
-                                        ascending=[False, True, True]) # Vermelho > Amarelo > Verde
-
-# Mapeamento de cor do Semáforo para estilo CSS (para melhor visualização no Streamlit)
-def color_semaforo(val):
-    if val == "VERMELHO":
-        return 'background-color: #ffcccc; color: black; font-weight: bold;' # Vermelho claro
-    elif val == "AMARELO":
-        return 'background-color: #ffe4b2; color: black;' # Laranja claro
-    elif val == "VERDE":
-        return 'background-color: #ccffcc; color: black;' # Verde claro
-    else: # AZUL (Sem Data Limite)
-        return 'background-color: #e0f7fa; color: black;' # Azul claro
-
-# Colunas para exibir
-colunas_exibir = ["Concluída", "Ação", "Contexto", "Projeto", "Data Limite", "Semáforo"]
-df_exibicao = df_pendentes[colunas_exibir].reset_index(drop=True)
-
-st.caption(f"Total de {len(df_pendentes)} Ações Pendentes.")
-
-# Adiciona o seletor de conclusão em cada linha
-for i, row in df_pendentes.iterrows():
-    # Calcula o índice correto dentro do st.session_state.tarefas
-    # Nota: Este é um hack necessário devido à forma como o Streamlit lida com o estado.
-    original_index = st.session_state.tarefas.index(row.to_dict()) 
-    
-    col_c, col_a, col_t, col_p, col_d, col_s = st.columns([0.5, 4, 1.5, 1.5, 1.5, 1])
-    
-    with col_c:
-        # Checkbox para marcar como concluída
-        concluida = st.checkbox("", value=row["Concluída"], key=f"check_{i}", 
-                                on_change=atualizar_status_conclusao, args=(original_index, not row["Concluída"]))
-    
-    # Aplica o estilo do Semáforo na Ação para maior visibilidade
-    # Como não temos acesso a CSS inline direto no st.markdown, 
-    # simulamos o destaque com emoji e BOLD, e usamos a coluna Semáforo para o visual principal
-    emoji_semaforo = "🔴" if row["Semáforo"] == "VERMELHO" else ("🟡" if row["Semáforo"] == "AMARELO" else ("🟢" if row["Semáforo"] == "VERDE" else "🔵"))
-    
-    with col_a:
-        st.markdown(f"{emoji_semaforo} **{row['Ação']}**")
-    with col_t:
-        st.markdown(f"*{row['Contexto']}*")
-    with col_p:
-        st.markdown(f"_{row['Projeto'] or ''}_")
-    with col_d:
-        st.markdown(f"{row['Data Limite'].strftime('%d/%m/%Y') if row['Data Limite'] else ''}")
-    with col_s:
-        st.markdown(f"**{row['Semáforo']}**") # A cor deve ser aplicada visualmente na célula, mas aqui fica só o texto
-        
-st.markdown("---")
-
-# --- 7. Lista de Concluídas (Para Refletir) ---
-st.subheader("✅ Concluídas (Refletir)")
-df_concluidas = df_filtrado[df_filtrado["Concluída"] == True]
-
-if not df_concluidas.empty:
-    st.dataframe(df_concluidas[["Ação", "Contexto", "Data Limite"]].style.applymap(lambda x: 'color: #888888;', subset=["Ação"]),
-                 hide_index=True)
-else:
-    st.info("Nenhuma tarefa concluída neste filtro ainda.")
-
-# --- Dica GTD ---
-st.caption("💡 Lembrete GTD: Faça a **Revisão Semanal** usando este painel para garantir que todos os Projetos tenham a sua Próxima Ação definida!")
+        if not df_demandas.empty:
+            st.success(f"✅ Foram encontradas **{len(df_demandas)}** novas demandas com o assunto '{filtro_assunto}'!")
+            
+            # Exibe os dados capturados
+            st.dataframe(df_demandas, use_container_width=True)
+            
+            # Opcional: Permite exportar para CSV
+            csv = df_demandas.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Baixar Demandas em CSV",
+                data=csv,
+                file_name=f'demandas_{len(df_demandas)}_{pd.Timestamp.now().strftime("%Y%m%d")}.csv',
+                mime='text/csv',
+            )
+            
+        else:
+            # A função já trata o erro, esta é a mensagem para o caso de não encontrar resultados (sem erro de conexão)
+            if carregar_credenciais()[0]:
+                 st.warning("⚠️ Nenhuma nova demanda encontrada que corresponda ao filtro.")
